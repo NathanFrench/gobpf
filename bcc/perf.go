@@ -17,6 +17,8 @@ package bcc
 import (
 	"encoding/binary"
 	"fmt"
+	"log"
+	"reflect"
 	"sync"
 	"unsafe"
 
@@ -32,7 +34,10 @@ import (
 
 // perf_reader_raw_cb as defined in bcc libbpf.h
 // typedef void (*perf_reader_raw_cb)(void *cb_cookie, void *raw, int raw_size);
+// typedef void (*perf_reader_lost_cb)(void *cb_cookie, uint64_t lost);
+//
 extern void callback_to_go(void*, void*, int);
+extern void callback_lost_to_go(void *, uint64_t);
 */
 import "C"
 
@@ -44,6 +49,7 @@ type PerfMap struct {
 
 type callbackData struct {
 	receiverChan chan []byte
+	lostChan     chan uint64
 }
 
 const BPF_PERF_READER_PAGE_CNT = 8
@@ -96,13 +102,25 @@ func lookupCallback(i uint64) *callbackData {
 func callback_to_go(cbCookie unsafe.Pointer, raw unsafe.Pointer, rawSize C.int) {
 	callbackData := lookupCallback(uint64(uintptr(cbCookie)))
 	receiverChan := callbackData.receiverChan
+
 	go func() {
 		receiverChan <- C.GoBytes(raw, rawSize)
 	}()
 }
 
-// InitPerfMap initializes a perf map with a receiver channel.
-func InitPerfMap(table *Table, receiverChan chan []byte) (*PerfMap, error) {
+//export callback_lost_to_go
+func callback_lost_to_go(cbCookie unsafe.Pointer, lost C.uint64_t) {
+	cbData := lookupCallback(uint64(uintptr(cbCookie)))
+	lostCh := cbData.lostChan
+
+	log.Printf("lost: JFKDJFKLDSJLKDSFJSDLFJDS HI HIHIHIHIHIHIHIHIIIHIHI %p\n", lost)
+
+	go func() {
+		lostCh <- uint64(lost)
+	}()
+}
+
+func initPerfMap(table *Table, receiverChan chan []byte, lostChan chan uint64) (*PerfMap, error) {
 	fd := table.Config()["fd"].(int)
 	keySize := table.Config()["key_size"].(uint64)
 	leafSize := table.Config()["leaf_size"].(uint64)
@@ -112,7 +130,8 @@ func InitPerfMap(table *Table, receiverChan chan []byte) (*PerfMap, error) {
 	}
 
 	callbackDataIndex := registerCallback(&callbackData{
-		receiverChan,
+		receiverChan: receiverChan,
+		lostChan:     lostChan,
 	})
 
 	key := make([]byte, keySize)
@@ -123,6 +142,7 @@ func InitPerfMap(table *Table, receiverChan chan []byte) (*PerfMap, error) {
 	readers := []*C.struct_perf_reader{}
 
 	cpus, err := cpuonline.Get()
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine online cpus: %v", err)
 	}
@@ -155,6 +175,83 @@ func InitPerfMap(table *Table, receiverChan chan []byte) (*PerfMap, error) {
 	}, nil
 }
 
+const (
+	pmapArgTable = iota
+	pmapArgRecvChan
+	pmapArgLostChan
+)
+
+// InitPerfMap initializes a perf map with a receiver, and optional lost
+// message counter channel; see initPerfMap for more details as this is just a
+// wrapper around it (using an ...interface{} for argument parsing)
+//
+// args[0] will always be type `*Table`.
+// args[1] will always be type `chan []bytes`.
+// args[2] optional "lost messages" type `chan uint64`.
+//
+//	recvCh := make(chan []byte)
+//	lostCh := make(chan uint64) // can also be nil
+//	table  := NewTable(module.TableId("sys_chdir"), module)
+//	pmap, err := InitPerfMap(table, recvCh, lostCh)
+//
+func InitPerfMap(args ...interface{}) (*PerfMap, error) {
+	var table *Table
+	var recvCh chan []byte
+	var lostCh chan uint64
+
+	if 2 > len(args) {
+		panic("Not enough paramaters.")
+	}
+
+	for i, arg := range args {
+		switch i {
+		case pmapArgTable:
+			param, ok := arg.(*Table)
+
+			if !ok {
+				return nil, fmt.Errorf("a[0] must be of type *Table (got:%v)",
+					reflect.TypeOf(arg))
+			}
+
+			table = param
+		case pmapArgRecvChan:
+			if arg == nil {
+				break
+			}
+
+			param, ok := arg.(chan []byte)
+
+			if !ok {
+				return nil, fmt.Errorf("a[1] must be of type `chan []byte` (got:%v)",
+					reflect.TypeOf(arg))
+			}
+
+			recvCh = param
+		case pmapArgLostChan:
+			if arg == nil {
+				break
+			}
+
+			param, ok := arg.(chan uint64)
+
+			if !ok {
+				return nil, fmt.Errorf("a[2] must be of type `chan uint64` (got:%v)",
+					reflect.TypeOf(arg))
+			}
+
+			lostCh = param
+		}
+	}
+
+	return initPerfMap(table, recvCh, lostCh)
+}
+
+// InitPerfMapWLost does the same as initPerfMap with the ability to pass a
+// channel that contains the number of lost messages.
+func InitPerfMapWLost(table *Table, recvCh chan []byte, lostCh chan uint64) (*PerfMap, error) {
+	return initPerfMap(table, recvCh, lostCh)
+}
+
 // Start to poll the perf map reader and send back event data
 // over the connected channel.
 func (pm *PerfMap) Start() {
@@ -184,7 +281,7 @@ func bpfOpenPerfBuffer(cpu uint, callbackDataIndex uint64) (unsafe.Pointer, erro
 	cpuC := C.int(cpu)
 	reader, err := C.bpf_open_perf_buffer(
 		(C.perf_reader_raw_cb)(unsafe.Pointer(C.callback_to_go)),
-		nil,
+		(C.perf_reader_lost_cb)(unsafe.Pointer(C.callback_lost_to_go)),
 		unsafe.Pointer(uintptr(callbackDataIndex)),
 		-1, cpuC, BPF_PERF_READER_PAGE_CNT)
 	if reader == nil {
