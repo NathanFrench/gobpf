@@ -24,8 +24,6 @@ import (
 )
 
 /*
-#cgo CFLAGS: -I/usr/include/bcc/compat
-#cgo LDFLAGS: -lbcc
 #include <bcc/bpf_common.h>
 #include <bcc/libbpf.h>
 void perf_reader_free(void *ptr);
@@ -36,8 +34,8 @@ import "C"
 type Module struct {
 	p       unsafe.Pointer
 	funcs   map[string]int
-	kprobes map[string]unsafe.Pointer
-	uprobes map[string]unsafe.Pointer
+	kprobes map[string]C.int
+	uprobes map[string]C.int
 }
 
 type compileRequest struct {
@@ -81,15 +79,17 @@ func newModule(code string, cflags []string) *Module {
 	}
 	cs := C.CString(code)
 	defer C.free(unsafe.Pointer(cs))
+
 	c := C.bpf_module_create_c_from_string(cs, 2, (**C.char)(&cflagsC[0]), C.int(len(cflagsC)))
+
 	if c == nil {
 		return nil
 	}
 	return &Module{
 		p:       c,
 		funcs:   make(map[string]int),
-		kprobes: make(map[string]unsafe.Pointer),
-		uprobes: make(map[string]unsafe.Pointer),
+		kprobes: make(map[string]C.int),
+		uprobes: make(map[string]C.int),
 	}
 }
 
@@ -114,13 +114,13 @@ func compile() {
 func (bpf *Module) Close() {
 	C.bpf_module_destroy(bpf.p)
 	for k, v := range bpf.kprobes {
-		C.perf_reader_free(v)
+		C.bpf_close_perf_event_fd(v)
 		evNameCS := C.CString(k)
 		C.bpf_detach_kprobe(evNameCS)
 		C.free(unsafe.Pointer(evNameCS))
 	}
 	for k, v := range bpf.uprobes {
-		C.perf_reader_free(v)
+		C.bpf_close_perf_event_fd(v)
 		evNameCS := C.CString(k)
 		C.bpf_detach_uprobe(evNameCS)
 		C.free(unsafe.Pointer(evNameCS))
@@ -192,11 +192,11 @@ func (bpf *Module) attachProbe(evName string, attachType uint32, fnName string, 
 
 	evNameCS := C.CString(evName)
 	fnNameCS := C.CString(fnName)
-	res, err := C.bpf_attach_kprobe(C.int(fd), attachType, evNameCS, fnNameCS, -1, 0, -1, nil, nil)
+	res, err := C.bpf_attach_kprobe(C.int(fd), attachType, evNameCS, fnNameCS)
 	C.free(unsafe.Pointer(evNameCS))
 	C.free(unsafe.Pointer(fnNameCS))
 
-	if res == nil {
+	if res == -1 {
 		return fmt.Errorf("failed to attach BPF kprobe: %v", err)
 	}
 	bpf.kprobes[evName] = res
@@ -206,13 +206,21 @@ func (bpf *Module) attachProbe(evName string, attachType uint32, fnName string, 
 func (bpf *Module) attachUProbe(evName string, attachType uint32, path string, addr uint64, fd, pid int) error {
 	evNameCS := C.CString(evName)
 	binaryPathCS := C.CString(path)
-	res, err := C.bpf_attach_uprobe(C.int(fd), attachType, evNameCS, binaryPathCS, (C.uint64_t)(addr), (C.pid_t)(pid), 0, -1, nil, nil)
+
+	res, err := C.bpf_attach_uprobe(C.int(fd),
+		attachType,
+		evNameCS,
+		binaryPathCS,
+		(C.uint64_t)(addr),
+		(C.pid_t)(pid))
+
 	C.free(unsafe.Pointer(evNameCS))
 	C.free(unsafe.Pointer(binaryPathCS))
 
-	if res == nil {
+	if res == -1 {
 		return fmt.Errorf("failed to attach BPF uprobe: %v", err)
 	}
+
 	bpf.uprobes[evName] = res
 	return nil
 }

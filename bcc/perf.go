@@ -17,7 +17,6 @@ package bcc
 import (
 	"encoding/binary"
 	"fmt"
-	"log"
 	"reflect"
 	"sync"
 	"unsafe"
@@ -26,16 +25,14 @@ import (
 )
 
 /*
-#cgo CFLAGS: -I/usr/include/bcc/compat
-#cgo LDFLAGS: -lbcc
+#include <stdint.h>
 #include <bcc/bpf_common.h>
-#include <bcc/libbpf.h>
 #include <bcc/perf_reader.h>
 
 // perf_reader_raw_cb as defined in bcc libbpf.h
 // typedef void (*perf_reader_raw_cb)(void *cb_cookie, void *raw, int raw_size);
 // typedef void (*perf_reader_lost_cb)(void *cb_cookie, uint64_t lost);
-//
+
 extern void callback_to_go(void*, void*, int);
 extern void callback_lost_to_go(void *, uint64_t);
 */
@@ -113,7 +110,7 @@ func callback_lost_to_go(cbCookie unsafe.Pointer, lost C.uint64_t) {
 	cbData := lookupCallback(uint64(uintptr(cbCookie)))
 	lostCh := cbData.lostChan
 
-	log.Printf("lost: JFKDJFKLDSJLKDSFJSDLFJDS HI HIHIHIHIHIHIHIHIIIHIHI %p\n", lost)
+	// log.Printf("lost: %v %v %v\n", lost, cbData, lostCh)
 
 	go func() {
 		lostCh <- uint64(lost)

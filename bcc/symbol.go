@@ -22,8 +22,6 @@ import (
 )
 
 /*
-#cgo CFLAGS: -I/usr/include/bcc/compat
-#cgo LDFLAGS: -lbcc
 #include <bcc/bpf_common.h>
 #include <bcc/libbpf.h>
 #include <bcc/bcc_syms.h>
