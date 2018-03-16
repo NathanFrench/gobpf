@@ -26,13 +26,16 @@ import (
 /*
 #cgo CFLAGS: -I/usr/include/bcc/compat
 #cgo LDFLAGS: -lbcc
+#include <stdint.h>
 #include <bcc/bpf_common.h>
 #include <bcc/libbpf.h>
 #include <bcc/perf_reader.h>
 
-// perf_reader_raw_cb as defined in bcc libbpf.h
+// perf_reader_(raw|lost)_cb as defined in bcc libbpf.h v0.5.0
 // typedef void (*perf_reader_raw_cb)(void *cb_cookie, void *raw, int raw_size);
+// typedef void (*perf_reader_lost_cb)(uint64_t lost);
 extern void callback_to_go(void*, void*, int);
+extern void callback_lost_to_go(uint64_t);
 */
 import "C"
 
@@ -51,6 +54,7 @@ const BPF_PERF_READER_PAGE_CNT = 8
 var byteOrder binary.ByteOrder
 var callbackRegister = make(map[uint64]*callbackData)
 var callbackIndex uint64
+var lostCount uint64
 var mu sync.Mutex
 
 // In lack of binary.HostEndian ...
@@ -99,6 +103,30 @@ func callback_to_go(cbCookie unsafe.Pointer, raw unsafe.Pointer, rawSize C.int) 
 	go func() {
 		receiverChan <- C.GoBytes(raw, rawSize)
 	}()
+}
+
+// bcc v0.5.0 does not pass along our 'cookie' value, so we have no way
+// to reference where our go callbackdata is. So here we just use a global
+// counter, increment it blindly, and reset it whenever the value is pulled.
+//export callback_lost_to_go
+func callback_lost_to_go(count C.uint64_t) {
+	mu.Lock()
+	defer mu.Unlock()
+
+	lostCount += uint64(count)
+}
+
+// Lost returns the accummulated number of messages that were marked as lost.
+// Since 0.5.0 does not pass along the cookie information to our lost callback,
+// and we just sum a global variable, we also reset it back to zero.
+func (pm *PerfMap) Lost() uint64 {
+	mu.Lock()
+	defer mu.Unlock()
+
+	lost := lostCount
+	lostCount = 0
+
+	return lost
 }
 
 // InitPerfMap initializes a perf map with a receiver channel.
@@ -184,7 +212,7 @@ func bpfOpenPerfBuffer(cpu uint, callbackDataIndex uint64) (unsafe.Pointer, erro
 	cpuC := C.int(cpu)
 	reader, err := C.bpf_open_perf_buffer(
 		(C.perf_reader_raw_cb)(unsafe.Pointer(C.callback_to_go)),
-		nil,
+		(C.perf_reader_lost_cb)(unsafe.Pointer(C.callback_lost_to_go)),
 		unsafe.Pointer(uintptr(callbackDataIndex)),
 		-1, cpuC, BPF_PERF_READER_PAGE_CNT)
 	if reader == nil {
